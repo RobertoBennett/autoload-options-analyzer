@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Autoload Options Analyzer
  * Description: Анализирует и отображает все опции с автозагрузкой в WordPress
- * Plugin URI: https://yoursite.com/
+ * Plugin URI: https://github.com/RobertoBennett/autoload-options-analyzer
  * Version: 1.3
  * Author: Robert Bennett
  * Text Domain: Autoload Options Analyzer
@@ -398,4 +398,5 @@ function aoa_format_bytes($bytes, $precision = 2) {
     }
     
     return round($bytes, $precision) . ' ' . $units[$i];
+
 }
