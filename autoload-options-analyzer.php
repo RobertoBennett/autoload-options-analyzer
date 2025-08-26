@@ -400,3 +400,4 @@ function aoa_format_bytes($bytes, $precision = 2) {
     return round($bytes, $precision) . ' ' . $units[$i];
 
 }
+
