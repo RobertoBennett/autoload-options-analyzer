@@ -3,7 +3,7 @@
  * Plugin Name: Autoload Options Analyzer
  * Description: Анализирует и отображает все опции с автозагрузкой в WordPress
  * Plugin URI: https://github.com/RobertoBennett/autoload-options-analyzer
- * Version: 1.3
+ * Version: 1.4
  * Author: Robert Bennett
  * Text Domain: Autoload Options Analyzer
  */
@@ -18,6 +18,7 @@ add_action('admin_menu', 'aoa_add_admin_menu');
 
 // Регистрируем AJAX обработчики
 add_action('wp_ajax_aoa_toggle_autoload', 'aoa_ajax_toggle_autoload');
+add_action('wp_ajax_aoa_bulk_toggle_autoload', 'aoa_ajax_bulk_toggle_autoload');
 
 function aoa_add_admin_menu() {
     add_management_page(
@@ -29,7 +30,85 @@ function aoa_add_admin_menu() {
     );
 }
 
-// AJAX обработчик для изменения автозагрузки
+// AJAX обработчик для массового изменения автозагрузки
+function aoa_ajax_bulk_toggle_autoload() {
+    // Проверяем nonce для безопасности
+    if (!wp_verify_nonce($_POST['nonce'], 'aoa_bulk_toggle_nonce')) {
+        wp_die('Ошибка безопасности');
+    }
+    
+    // Проверяем права пользователя
+    if (!current_user_can('manage_options')) {
+        wp_die('Недостаточно прав');
+    }
+    
+    $option_names = isset($_POST['option_names']) ? $_POST['option_names'] : array();
+    $action = sanitize_text_field($_POST['bulk_action']); // 'disable' или 'enable'
+    
+    if (empty($option_names) || !is_array($option_names)) {
+        wp_send_json_error('Не выбраны опции для обработки');
+    }
+    
+    if (!in_array($action, array('disable', 'enable'))) {
+        wp_send_json_error('Неверное действие');
+    }
+    
+    global $wpdb;
+    
+    $processed = 0;
+    $errors = array();
+    $skipped = array();
+    
+    // Определяем новое значение autoload
+    $new_autoload = ($action === 'disable') ? 'no' : 'yes';
+    
+    foreach ($option_names as $option_name) {
+        $option_name = sanitize_text_field($option_name);
+        
+        if (empty($option_name)) {
+            continue;
+        }
+        
+        // Проверяем, что это не системная опция
+        if (aoa_is_core_option($option_name)) {
+            $skipped[] = $option_name . ' (системная опция)';
+            continue;
+        }
+        
+        // Обновляем опцию в базе данных
+        $result = $wpdb->update(
+            $wpdb->options,
+            array('autoload' => $new_autoload),
+            array('option_name' => $option_name),
+            array('%s'),
+            array('%s')
+        );
+        
+        if ($result === false) {
+            $errors[] = $option_name . ': ' . $wpdb->last_error;
+        } elseif ($result > 0) {
+            $processed++;
+        }
+    }
+    
+    // Очищаем кеш опций WordPress
+    wp_cache_delete('alloptions', 'options');
+    
+    $response_data = array(
+        'processed' => $processed,
+        'errors' => $errors,
+        'skipped' => $skipped,
+        'action' => $action
+    );
+    
+    if ($processed > 0) {
+        wp_send_json_success($response_data);
+    } else {
+        wp_send_json_error($response_data);
+    }
+}
+
+// AJAX обработчик для изменения автозагрузки (одиночная операция)
 function aoa_ajax_toggle_autoload() {
     // Проверяем nonce для безопасности
     if (!wp_verify_nonce($_POST['nonce'], 'aoa_toggle_nonce')) {
@@ -205,52 +284,84 @@ function aoa_display_page() {
             <p>Общий размер данных: <?php echo aoa_format_bytes($total_size); ?></p>
         </div>
         
-        <?php if (!empty($grouped_options)): ?>
-        <table class="wp-list-table widefat fixed striped">
-            <thead>
-                <tr>
-                    <th style="width: 20%;">Источник</th>
-                    <th style="width: 50%;">Имя опции</th>
-                    <th style="width: 15%;">Размер</th>
-                    <th style="width: 15%;">Действия</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($grouped_options as $source => $options): ?>
-                    <?php foreach ($options as $option): ?>
-                        <tr id="option-row-<?php echo esc_attr($option->option_name); ?>">
-                            <td><strong><?php echo esc_html($source); ?></strong></td>
-                            <td>
-                                <code style="font-size: 11px;">
-                                    <?php echo esc_html($option->option_name); ?>
-                                </code>
-                            </td>
-                            <td><?php echo aoa_format_bytes(intval($option->size)); ?></td>
-                            <td>
-                                <?php if (!aoa_is_core_option($option->option_name)): ?>
-                                    <?php if ($option->autoload === 'yes'): ?>
-                                        <button class="button button-small aoa-toggle-btn" 
-                                                data-option="<?php echo esc_attr($option->option_name); ?>"
-                                                data-action="disable">
-                                            Отключить автозагрузку
-                                        </button>
-                                    <?php else: ?>
-                                        <button class="button button-small button-primary aoa-toggle-btn" 
-                                                data-option="<?php echo esc_attr($option->option_name); ?>"
-                                                data-action="enable">
-                                            Включить автозагрузку
-                                        </button>
+        <!-- Форма для массовых операций -->
+        <form id="aoa-bulk-form" method="post">
+            <div class="tablenav top">
+                <div class="alignleft actions bulkactions">
+                    <label for="bulk-action-selector-top" class="screen-reader-text">Выберите массовое действие</label>
+                    <select name="bulk_action" id="bulk-action-selector-top">
+                        <option value="-1">Массовые действия</option>
+                        <?php if (!$show_disabled): ?>
+                            <option value="disable">Отключить автозагрузку</option>
+                        <?php else: ?>
+                            <option value="enable">Включить автозагрузку</option>
+                        <?php endif; ?>
+                    </select>
+                    <input type="submit" id="doaction" class="button action" value="Применить">
+                </div>
+                <div class="alignright">
+                    <span class="displaying-num"><?php echo count($autoload_options); ?> элементов</span>
+                </div>
+            </div>
+            
+            <?php if (!empty($grouped_options)): ?>
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <td id="cb" class="manage-column column-cb check-column">
+                            <label class="screen-reader-text" for="cb-select-all-1">Выбрать все</label>
+                            <input id="cb-select-all-1" type="checkbox">
+                        </td>
+                        <th style="width: 20%;">Источник</th>
+                        <th style="width: 45%;">Имя опции</th>
+                        <th style="width: 15%;">Размер</th>
+                        <th style="width: 15%;">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($grouped_options as $source => $options): ?>
+                        <?php foreach ($options as $option): ?>
+                            <tr id="option-row-<?php echo esc_attr($option->option_name); ?>">
+                                <th scope="row" class="check-column">
+                                    <?php if (!aoa_is_core_option($option->option_name)): ?>
+                                        <input type="checkbox" name="option_names[]" 
+                                               value="<?php echo esc_attr($option->option_name); ?>" 
+                                               id="checkbox_<?php echo esc_attr($option->option_name); ?>">
                                     <?php endif; ?>
-                                <?php else: ?>
-                                    <span class="description">Системная опция</span>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
+                                </th>
+                                <td><strong><?php echo esc_html($source); ?></strong></td>
+                                <td>
+                                    <code style="font-size: 11px;">
+                                        <?php echo esc_html($option->option_name); ?>
+                                    </code>
+                                </td>
+                                <td><?php echo aoa_format_bytes(intval($option->size)); ?></td>
+                                <td>
+                                    <?php if (!aoa_is_core_option($option->option_name)): ?>
+                                        <?php if ($option->autoload === 'yes'): ?>
+                                            <button class="button button-small aoa-toggle-btn" 
+                                                    data-option="<?php echo esc_attr($option->option_name); ?>"
+                                                    data-action="disable">
+                                                Отключить автозагрузку
+                                            </button>
+                                        <?php else: ?>
+                                            <button class="button button-small button-primary aoa-toggle-btn" 
+                                                    data-option="<?php echo esc_attr($option->option_name); ?>"
+                                                    data-action="enable">
+                                                Включить автозагрузку
+                                            </button>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <span class="description">Системная опция</span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
                     <?php endforeach; ?>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-        <?php endif; ?>
+                </tbody>
+            </table>
+            <?php endif; ?>
+        </form>
         
         <!-- Индикатор загрузки -->
         <div id="aoa-loading" style="display: none;">
@@ -275,10 +386,117 @@ function aoa_display_page() {
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         z-index: 9999;
     }
+    .bulkactions {
+        margin-right: 10px;
+    }
     </style>
     
     <script>
     jQuery(document).ready(function($) {
+        // Обработчик для чекбокса "Выбрать все"
+        $('#cb-select-all-1').on('change', function() {
+            var isChecked = $(this).prop('checked');
+            $('input[name="option_names[]"]').prop('checked', isChecked);
+        });
+        
+        // Обработчик для индивидуальных чекбоксов
+        $('input[name="option_names[]"]').on('change', function() {
+            var totalCheckboxes = $('input[name="option_names[]"]').length;
+            var checkedCheckboxes = $('input[name="option_names[]"]:checked').length;
+            
+            $('#cb-select-all-1').prop('checked', totalCheckboxes === checkedCheckboxes);
+        });
+        
+        // Обработчик массовых операций
+        $('#aoa-bulk-form').on('submit', function(e) {
+            e.preventDefault();
+            
+            var bulkAction = $('#bulk-action-selector-top').val();
+            var selectedOptions = $('input[name="option_names[]"]:checked');
+            
+            if (bulkAction === '-1') {
+                alert('Пожалуйста, выберите действие из выпадающего списка.');
+                return;
+            }
+            
+            if (selectedOptions.length === 0) {
+                alert('Пожалуйста, выберите хотя бы одну опцию для обработки.');
+                return;
+            }
+            
+            var optionNames = [];
+            selectedOptions.each(function() {
+                optionNames.push($(this).val());
+            });
+            
+            var confirmMessage = bulkAction === 'disable' ? 
+                'Вы уверены, что хотите отключить автозагрузку для ' + optionNames.length + ' опций? Это может повлиять на работу сайта.' :
+                'Вы уверены, что хотите включить автозагрузку для ' + optionNames.length + ' опций?';
+                
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+            
+            // Показываем индикатор загрузки
+            $('#aoa-loading').show();
+            $('#doaction').prop('disabled', true);
+            
+            // AJAX запрос для массовой операции
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'aoa_bulk_toggle_autoload',
+                    option_names: optionNames,
+                    bulk_action: bulkAction,
+                    nonce: '<?php echo wp_create_nonce('aoa_bulk_toggle_nonce'); ?>'
+                },
+                success: function(response) {
+                    $('#aoa-loading').hide();
+                    $('#doaction').prop('disabled', false);
+                    
+                    if (response.success) {
+                        var message = 'Обработано опций: ' + response.data.processed;
+                        
+                        if (response.data.skipped.length > 0) {
+                            message += '\nПропущено: ' + response.data.skipped.length + ' (системные опции)';
+                        }
+                        
+                        if (response.data.errors.length > 0) {
+                            message += '\nОшибки: ' + response.data.errors.length;
+                        }
+                        
+                        $('<div class="notice notice-success is-dismissible"><p>' + message + '</p></div>')
+                            .insertAfter('.wrap h1')
+                            .delay(5000)
+                            .fadeOut();
+                        
+                        // Перезагружаем страницу через 2 секунды для обновления данных
+                        setTimeout(function() {
+                            location.reload();
+                        }, 2000);
+                    } else {
+                        var errorMessage = 'Ошибка при выполнении массовой операции.';
+                        
+                        if (response.data && response.data.errors && response.data.errors.length > 0) {
+                            errorMessage += '\nОшибки: ' + response.data.errors.join(', ');
+                        }
+                        
+                        $('<div class="notice notice-error is-dismissible"><p>' + errorMessage + '</p></div>')
+                            .insertAfter('.wrap h1');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#aoa-loading').hide();
+                    $('#doaction').prop('disabled', false);
+                    
+                    $('<div class="notice notice-error is-dismissible"><p>Ошибка AJAX: ' + error + '</p></div>')
+                        .insertAfter('.wrap h1');
+                }
+            });
+        });
+        
+        // Обработчик для индивидуальных кнопок (оставляем старую функциональность)
         $('.aoa-toggle-btn').on('click', function(e) {
             e.preventDefault();
             
@@ -398,6 +616,4 @@ function aoa_format_bytes($bytes, $precision = 2) {
     }
     
     return round($bytes, $precision) . ' ' . $units[$i];
-
 }
-
