@@ -3,7 +3,7 @@
  * Plugin Name: Autoload Options Analyzer
  * Description: Анализирует и отображает все опции с автозагрузкой в WordPress
  * Plugin URI: https://github.com/RobertoBennett/autoload-options-analyzer
- * Version: 1.4
+ * Version: 1.5
  * Author: Robert Bennett
  * Text Domain: Autoload Options Analyzer
  */
@@ -19,6 +19,8 @@ add_action('admin_menu', 'aoa_add_admin_menu');
 // Регистрируем AJAX обработчики
 add_action('wp_ajax_aoa_toggle_autoload', 'aoa_ajax_toggle_autoload');
 add_action('wp_ajax_aoa_bulk_toggle_autoload', 'aoa_ajax_bulk_toggle_autoload');
+add_action('wp_ajax_aoa_delete_option', 'aoa_ajax_delete_option');
+add_action('wp_ajax_aoa_bulk_delete_options', 'aoa_ajax_bulk_delete_options');
 
 function aoa_add_admin_menu() {
     add_management_page(
@@ -28,6 +30,132 @@ function aoa_add_admin_menu() {
         'autoload-analyzer',
         'aoa_display_page'
     );
+}
+
+// AJAX обработчик для удаления одной опции
+function aoa_ajax_delete_option() {
+    // Проверяем nonce для безопасности
+    if (!wp_verify_nonce($_POST['nonce'], 'aoa_delete_nonce')) {
+        wp_die('Ошибка безопасности');
+    }
+    
+    // Проверяем права пользователя
+    if (!current_user_can('manage_options')) {
+        wp_die('Недостаточно прав');
+    }
+    
+    $option_name = sanitize_text_field($_POST['option_name']);
+    
+    if (empty($option_name)) {
+        wp_send_json_error('Не указано имя опции');
+    }
+    
+    // Проверяем, что это не системная опция
+    if (aoa_is_core_option($option_name)) {
+        wp_send_json_error('Нельзя удалять системные опции WordPress');
+    }
+    
+    // Проверяем, что опция действительно отключена
+    $option_autoload = get_option($option_name . '_autoload_status');
+    global $wpdb;
+    
+    $current_option = $wpdb->get_row(
+        $wpdb->prepare(
+            "SELECT autoload FROM {$wpdb->options} WHERE option_name = %s",
+            $option_name
+        )
+    );
+    
+    if (!$current_option || $current_option->autoload !== 'no') {
+        wp_send_json_error('Можно удалять только опции с отключенной автозагрузкой');
+    }
+    
+    // Удаляем опцию
+    $result = delete_option($option_name);
+    
+    if ($result) {
+        wp_send_json_success('Опция успешно удалена: ' . $option_name);
+    } else {
+        wp_send_json_error('Ошибка при удалении опции или опция не существует');
+    }
+}
+
+// AJAX обработчик для массового удаления опций
+function aoa_ajax_bulk_delete_options() {
+    // Проверяем nonce для безопасности
+    if (!wp_verify_nonce($_POST['nonce'], 'aoa_bulk_delete_nonce')) {
+        wp_die('Ошибка безопасности');
+    }
+    
+    // Проверяем права пользователя
+    if (!current_user_can('manage_options')) {
+        wp_die('Недостаточно прав');
+    }
+    
+    $option_names = isset($_POST['option_names']) ? $_POST['option_names'] : array();
+    
+    if (empty($option_names) || !is_array($option_names)) {
+        wp_send_json_error('Не выбраны опции для удаления');
+    }
+    
+    global $wpdb;
+    
+    $deleted = 0;
+    $errors = array();
+    $skipped = array();
+    
+    foreach ($option_names as $option_name) {
+        $option_name = sanitize_text_field($option_name);
+        
+        if (empty($option_name)) {
+            continue;
+        }
+        
+        // Проверяем, что это не системная опция
+        if (aoa_is_core_option($option_name)) {
+            $skipped[] = $option_name . ' (системная опция)';
+            continue;
+        }
+        
+        // Проверяем, что опция действительно отключена
+        $current_option = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT autoload FROM {$wpdb->options} WHERE option_name = %s",
+                $option_name
+            )
+        );
+        
+        if (!$current_option) {
+            $skipped[] = $option_name . ' (не найдена)';
+            continue;
+        }
+        
+        if ($current_option->autoload !== 'no') {
+            $skipped[] = $option_name . ' (автозагрузка включена)';
+            continue;
+        }
+        
+        // Удаляем опцию
+        $result = delete_option($option_name);
+        
+        if ($result) {
+            $deleted++;
+        } else {
+            $errors[] = $option_name;
+        }
+    }
+    
+    $response_data = array(
+        'deleted' => $deleted,
+        'errors' => $errors,
+        'skipped' => $skipped
+    );
+    
+    if ($deleted > 0) {
+        wp_send_json_success($response_data);
+    } else {
+        wp_send_json_error($response_data);
+    }
 }
 
 // AJAX обработчик для массового изменения автозагрузки
@@ -284,6 +412,12 @@ function aoa_display_page() {
             <p>Общий размер данных: <?php echo aoa_format_bytes($total_size); ?></p>
         </div>
         
+        <?php if ($show_disabled): ?>
+        <div class="notice notice-warning">
+            <p><strong>⚠️ Внимание!</strong> Вы просматриваете опции с отключенной автозагрузкой. Их можно безопасно удалить, если они больше не нужны.</p>
+        </div>
+        <?php endif; ?>
+        
         <!-- Форма для массовых операций -->
         <form id="aoa-bulk-form" method="post">
             <div class="tablenav top">
@@ -295,6 +429,7 @@ function aoa_display_page() {
                             <option value="disable">Отключить автозагрузку</option>
                         <?php else: ?>
                             <option value="enable">Включить автозагрузку</option>
+                            <option value="delete" style="color: #d63638;">🗑️ Удалить опции</option>
                         <?php endif; ?>
                     </select>
                     <input type="submit" id="doaction" class="button action" value="Применить">
@@ -312,10 +447,10 @@ function aoa_display_page() {
                             <label class="screen-reader-text" for="cb-select-all-1">Выбрать все</label>
                             <input id="cb-select-all-1" type="checkbox">
                         </td>
-                        <th style="width: 20%;">Источник</th>
-                        <th style="width: 45%;">Имя опции</th>
-                        <th style="width: 15%;">Размер</th>
-                        <th style="width: 15%;">Действия</th>
+                        <th style="width: 18%;">Источник</th>
+                        <th style="width: 40%;">Имя опции</th>
+                        <th style="width: 12%;">Размер</th>
+                        <th style="width: 25%;">Действия</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -350,6 +485,11 @@ function aoa_display_page() {
                                                     data-action="enable">
                                                 Включить автозагрузку
                                             </button>
+                                            <button class="button button-small aoa-delete-btn" 
+                                                    data-option="<?php echo esc_attr($option->option_name); ?>"
+                                                    style="color: #d63638; border-color: #d63638; margin-left: 5px;">
+                                                🗑️ Удалить
+                                            </button>
                                         <?php endif; ?>
                                     <?php else: ?>
                                         <span class="description">Системная опция</span>
@@ -370,9 +510,13 @@ function aoa_display_page() {
     </div>
     
     <style>
-    .aoa-toggle-btn:disabled {
+    .aoa-toggle-btn:disabled, .aoa-delete-btn:disabled {
         opacity: 0.6;
         cursor: not-allowed;
+    }
+    .aoa-delete-btn:hover {
+        background-color: #d63638;
+        color: white;
     }
     #aoa-loading {
         position: fixed;
@@ -388,6 +532,9 @@ function aoa_display_page() {
     }
     .bulkactions {
         margin-right: 10px;
+    }
+    select option[value="delete"] {
+        background-color: #ffebee;
     }
     </style>
     
@@ -429,9 +576,24 @@ function aoa_display_page() {
                 optionNames.push($(this).val());
             });
             
-            var confirmMessage = bulkAction === 'disable' ? 
-                'Вы уверены, что хотите отключить автозагрузку для ' + optionNames.length + ' опций? Это может повлиять на работу сайта.' :
-                'Вы уверены, что хотите включить автозагрузку для ' + optionNames.length + ' опций?';
+            var confirmMessage;
+            var ajaxAction;
+            var nonce;
+            
+            if (bulkAction === 'delete') {
+                confirmMessage = '⚠️ ВНИМАНИЕ! Вы собираетесь ПОЛНОСТЬЮ УДАЛИТЬ ' + optionNames.length + ' опций из базы данных!\n\n' +
+                               'Это действие НЕОБРАТИМО! Удаленные опции нельзя будет восстановить.\n\n' +
+                               'Убедитесь, что эти опции действительно не нужны для работы сайта.\n\n' +
+                               'Продолжить удаление?';
+                ajaxAction = 'aoa_bulk_delete_options';
+                nonce = '<?php echo wp_create_nonce('aoa_bulk_delete_nonce'); ?>';
+            } else {
+                confirmMessage = bulkAction === 'disable' ? 
+                    'Вы уверены, что хотите отключить автозагрузку для ' + optionNames.length + ' опций? Это может повлиять на работу сайта.' :
+                    'Вы уверены, что хотите включить автозагрузку для ' + optionNames.length + ' опций?';
+                ajaxAction = 'aoa_bulk_toggle_autoload';
+                nonce = '<?php echo wp_create_nonce('aoa_bulk_toggle_nonce'); ?>';
+            }
                 
             if (!confirm(confirmMessage)) {
                 return;
@@ -441,28 +603,39 @@ function aoa_display_page() {
             $('#aoa-loading').show();
             $('#doaction').prop('disabled', true);
             
+            var requestData = {
+                action: ajaxAction,
+                option_names: optionNames,
+                nonce: nonce
+            };
+            
+            if (bulkAction !== 'delete') {
+                requestData.bulk_action = bulkAction;
+            }
+            
             // AJAX запрос для массовой операции
             $.ajax({
                 url: ajaxurl,
                 type: 'POST',
-                data: {
-                    action: 'aoa_bulk_toggle_autoload',
-                    option_names: optionNames,
-                    bulk_action: bulkAction,
-                    nonce: '<?php echo wp_create_nonce('aoa_bulk_toggle_nonce'); ?>'
-                },
+                data: requestData,
                 success: function(response) {
                     $('#aoa-loading').hide();
                     $('#doaction').prop('disabled', false);
                     
                     if (response.success) {
-                        var message = 'Обработано опций: ' + response.data.processed;
+                        var message;
                         
-                        if (response.data.skipped.length > 0) {
-                            message += '\nПропущено: ' + response.data.skipped.length + ' (системные опции)';
+                        if (bulkAction === 'delete') {
+                            message = 'Удалено опций: ' + response.data.deleted;
+                        } else {
+                            message = 'Обработано опций: ' + response.data.processed;
                         }
                         
-                        if (response.data.errors.length > 0) {
+                        if (response.data.skipped && response.data.skipped.length > 0) {
+                            message += '\nПропущено: ' + response.data.skipped.length;
+                        }
+                        
+                        if (response.data.errors && response.data.errors.length > 0) {
                             message += '\nОшибки: ' + response.data.errors.length;
                         }
                         
@@ -496,14 +669,75 @@ function aoa_display_page() {
             });
         });
         
-        // Обработчик для индивидуальных кнопок (оставляем старую функциональность)
+        // Обработчик для индивидуальных кнопок удаления
+        $('.aoa-delete-btn').on('click', function(e) {
+            e.preventDefault();
+            
+            var button = $(this);
+            var optionName = button.data('option');
+            
+            // Подтверждение удаления
+            var confirmMessage = '⚠️ ВНИМАНИЕ! Вы собираетесь ПОЛНОСТЬЮ УДАЛИТЬ опцию "' + optionName + '" из базы данных!\n\n' +
+                               'Это действие НЕОБРАТИМО! Удаленную опцию нельзя будет восстановить.\n\n' +
+                               'Убедитесь, что эта опция действительно не нужна для работы сайта.\n\n' +
+                               'Продолжить удаление?';
+                
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+            
+            // Отключаем кнопку и показываем индикатор загрузки
+            button.prop('disabled', true);
+            $('#aoa-loading').show();
+            
+            // AJAX запрос
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'aoa_delete_option',
+                    option_name: optionName,
+                    nonce: '<?php echo wp_create_nonce('aoa_delete_nonce'); ?>'
+                },
+                success: function(response) {
+                    $('#aoa-loading').hide();
+                    
+                    if (response.success) {
+                        // Показываем сообщение об успехе
+                        $('<div class="notice notice-success is-dismissible"><p>' + response.data + '</p></div>')
+                            .insertAfter('.wrap h1')
+                            .delay(3000)
+                            .fadeOut();
+                        
+                        // Перезагружаем страницу через 1 секунду для обновления данных
+                        setTimeout(function() {
+                            location.reload();
+                        }, 1000);
+                    } else {
+                        // Показываем сообщение об ошибке
+                        $('<div class="notice notice-error is-dismissible"><p>Ошибка: ' + response.data + '</p></div>')
+                            .insertAfter('.wrap h1');
+                        
+                        button.prop('disabled', false);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#aoa-loading').hide();
+                    button.prop('disabled', false);
+                    
+                    $('<div class="notice notice-error is-dismissible"><p>Ошибка AJAX: ' + error + '</p></div>')
+                        .insertAfter('.wrap h1');
+                }
+            });
+        });
+        
+        // Обработчик для индивидуальных кнопок переключения (оставляем старую функциональность)
         $('.aoa-toggle-btn').on('click', function(e) {
             e.preventDefault();
             
             var button = $(this);
             var optionName = button.data('option');
             var action = button.data('action');
-            var row = $('#option-row-' + optionName.replace(/[^a-zA-Z0-9]/g, '\\$&'));
             
             // Подтверждение действия
             var confirmMessage = action === 'disable' ? 
@@ -617,3 +851,4 @@ function aoa_format_bytes($bytes, $precision = 2) {
     
     return round($bytes, $precision) . ' ' . $units[$i];
 }
+?>
