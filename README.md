@@ -1,6 +1,6 @@
 # Autoload Options Analyzer
 
-![Version](https://img.shields.io/badge/Version-1.5-blue.svg)
+![Version](https://img.shields.io/badge/Version-1.6-blue.svg)
 ![WordPress](https://img.shields.io/badge/WordPress-5.0%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-GPL--2.0%2B-green.svg)
 ![Author](https://img.shields.io/badge/Author-Robert%20Bennett-lightgrey.svg)
